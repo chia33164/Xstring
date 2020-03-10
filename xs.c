@@ -52,6 +52,49 @@ static inline size_t xs_capacity(const xs *x)
 
 static inline int ilog2(uint32_t n) { return 32 - __builtin_clz(n) - 1; }
 
+struct Ref_Count {
+    size_t RefCount_;
+    char data_[1];
+};
+
+static inline size_t rc_getDataOffset ()
+{
+    return offsetof(struct Ref_Count, data_);
+}
+
+static inline struct Ref_Count* rc_fromData (char *x)
+{
+    return (struct Ref_Count *)((void *)x - rc_getDataOffset());
+}
+
+static inline size_t rc_count (char *x)
+{
+    return rc_fromData(x)->RefCount_;
+}
+
+static inline char *rc_create (const void *p, size_t capacity)
+{
+    struct Ref_Count *result = malloc(rc_getDataOffset() + ((size_t) 1 << capacity));
+    result->RefCount_ = 0;
+    memcpy(result->data_, p, strlen(p) + 1);
+    return result->data_;
+}
+
+static inline void rc_increment (char *x)
+{
+    rc_fromData(x)->RefCount_++;
+}
+
+static inline void rc_decrement (char *x)
+{
+    struct Ref_Count *dis = rc_fromData(x);
+    if (dis->RefCount_ == 0) {
+        free(dis);
+    } else {
+        dis->RefCount_--;
+    }
+}
+
 xs *xs_new(xs *x, const void *p)
 {
     *x = xs_literal_empty();
@@ -60,8 +103,7 @@ xs *xs_new(xs *x, const void *p)
         x->capacity = ilog2(len) + 1;
         x->size = len - 1;
         x->is_ptr = true;
-        x->ptr = malloc((size_t) 1 << x->capacity);
-        memcpy(x->ptr, p, len);
+        x->ptr = rc_create(p, x->capacity);
     } else {
         memcpy(x->data, p, len);
         x->space_left = 15 - (len - 1);
@@ -91,8 +133,7 @@ xs *xs_grow(xs *x, size_t len)
     else {
         char buf[16];
         memcpy(buf, x->data, 16);
-        x->ptr = malloc((size_t) 1 << len);
-        memcpy(x->ptr, buf, 16);
+        x->ptr = rc_create(xs_data(x), len);
     }
     x->is_ptr = true;
     x->capacity = len;
@@ -108,12 +149,19 @@ static inline xs *xs_newempty(xs *x)
 static inline xs *xs_free(xs *x)
 {
     if (xs_is_ptr(x))
-        free(xs_data(x));
+        rc_decrement(xs_data(x));
     return xs_newempty(x);
 }
 
 xs *xs_concat(xs *string, const xs *prefix, const xs *suffix)
 {
+    if (xs_is_ptr(string)) {
+        if (rc_count(xs_data(string)) > 0) {
+            rc_decrement(xs_data(string));
+            string->ptr = rc_create(xs_data(string), xs_capacity(string));
+        }
+    }
+
     size_t pres = xs_size(prefix), sufs = xs_size(suffix),
            size = xs_size(string), capacity = xs_capacity(string);
 
@@ -124,7 +172,9 @@ xs *xs_concat(xs *string, const xs *prefix, const xs *suffix)
         memmove(data + pres, data, size);
         memcpy(data, pre, pres);
         memcpy(data + pres + size, suf, sufs + 1);
-        string->space_left = 15 - (size + pres + sufs);
+        if (!xs_is_ptr(string)) {
+            string->space_left = 15 - (size + pres + sufs);
+        }
     } else {
         xs tmps = xs_literal_empty();
         xs_grow(&tmps, size + pres + sufs);
@@ -183,6 +233,25 @@ xs *xs_trim(xs *x, const char *trimset)
 #undef set_bit
 }
 
+xs *xs_cpy (xs *dest, const xs *src)
+{
+    if (xs_is_ptr(src)) {
+        /* String on heap */
+        dest->ptr = src->ptr;
+        dest->size = src->size;
+        dest->capacity = src->capacity;
+        dest->is_ptr = true;
+        rc_increment(xs_data(src));
+    } else {
+        /* String on stack */
+        memcpy(dest->data, src->data, xs_size(src));
+        dest->space_left = src->space_left;
+        dest->is_ptr = false;
+    }
+
+    return dest;
+}
+
 #include <stdio.h>
 
 int main()
@@ -194,6 +263,20 @@ int main()
     xs prefix = *xs_tmp("((("), suffix = *xs_tmp(")))");
     xs_concat(&string, &prefix, &suffix);
     printf("[%s] : %2zu\n", xs_data(&string), xs_size(&string));
+
+    xs copiedString = *xs_cpy(&xs_literal_empty(), &string);
+    printf("[%s] : %2zu\n", xs_data(&copiedString), xs_size(&copiedString));
+    // printf("src's refcount : %ld\n", rc_count(string.ptr));
+    // printf("copiedString's refcount : %ld\n", rc_count(copiedString.ptr));
+
+    xs copiedString2 = *xs_cpy(&xs_literal_empty(), &string);
+    // printf("src's refcount : %ld\n", rc_count(string.ptr));
+
+    xs_concat(&string, &prefix, &suffix);
+    printf("[%s] : %2zu\n", xs_data(&string), xs_size(&string));
+    // printf("src's refcount : %ld\n", rc_count(string.ptr));
+    printf("[%s] : %2zu\n", xs_data(&copiedString), xs_size(&copiedString));
+    // printf("copiedString's refcount : %ld\n", rc_count(copiedString.ptr));
 
     return 0;
 }
