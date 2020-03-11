@@ -269,6 +269,52 @@ xs *xs_cpy (xs *dest, const xs *src)
     return dest;
 }
 
+char *xs_strtok (xs *x, const const char *delim)
+{
+    /* Stored the stop pointer */
+    static char *remain_str = NULL;
+
+    /* Assign string to remain_str first call.
+     * Don't need to change remain_str If x is NULL
+     */
+    if (x)
+        remain_str = xs_data(x);
+    
+/* similar to strspn/strpbrk but it operates on binary data */
+    uint8_t mask[32] = {0};
+
+#define check_bit(byte) (mask[(uint8_t) byte / 8] & 1 << (uint8_t) byte % 8)
+#define set_bit(byte) (mask[(uint8_t) byte / 8] |= 1 << (uint8_t) byte % 8)
+
+    size_t start_token_idx, end_token_idx, slen = strlen(remain_str), trimlen = strlen(delim);
+
+    for (size_t i = 0; i < trimlen; i++)
+        set_bit(delim[i]);
+    for (start_token_idx = 0; start_token_idx < slen; start_token_idx++)
+        if (!check_bit(remain_str[start_token_idx])) {
+            break;
+        }
+    for (end_token_idx = start_token_idx + 1; end_token_idx < slen; end_token_idx++)
+        if (check_bit(remain_str[end_token_idx])) {
+            break;
+        }
+
+    size_t cpylen = end_token_idx - start_token_idx;
+    /* Not found delimit or only contain delimit in string */
+    if (cpylen == slen || start_token_idx == slen)
+        return NULL;
+
+    char *result = malloc(cpylen * sizeof(char) + 1);
+    memcpy(result, remain_str + start_token_idx, cpylen);
+    /* Add null at the end of string */
+    result[cpylen] = '\0';
+    remain_str += end_token_idx;
+
+    return result;
+#undef check_bit
+#undef set_bit
+}
+
 #include <stdio.h>
 
 int main()
@@ -280,13 +326,14 @@ int main()
     xs prefix = *xs_tmp("(((((("), suffix = *xs_tmp("))))))");
     xs_concat(&string, &prefix, &suffix);
     printf("[%s] : %2zu\n", xs_data(&string), xs_size(&string));
-    xs cpy = *xs_cpy(&xs_literal_empty(), &string);
-    printf("[%s] : %2zu\n", xs_data(&cpy), xs_size(&cpy));
-    printf("Ref count of string : %ld\n", rc_count(xs_data(&string)));
 
-    xs_trim(&string, "()");
-    printf("After trim : [%s] : %2zu\n", xs_data(&string), xs_size(&string));
-    printf("Ref count of string : %ld\n", rc_count(xs_data(&string)));
-    printf("Ref count of cpy : %ld\n", rc_count(xs_data(&cpy)));
+    char *str = xs_strtok(&string, "bar");
+    while (str != NULL) {
+        printf("str : %s\n", str);
+        free(str);
+        str = xs_strtok(NULL, "bar");
+    }
+    
+    xs_free(&string);
     return 0;
 }
