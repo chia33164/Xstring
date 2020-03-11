@@ -53,25 +53,33 @@ static inline size_t xs_capacity(const xs *x)
 static inline int ilog2(uint32_t n) { return 32 - __builtin_clz(n) - 1; }
 
 struct Ref_Count {
+    /* Stored how many times the string is copied with Copy-on-write */
     size_t RefCount_;
+    /* Address of string */
     char data_[1];
 };
 
+/* Return the offset between struct Ref_Count and its member data_ */
 static inline size_t rc_getDataOffset ()
 {
     return offsetof(struct Ref_Count, data_);
 }
 
+/* Return address of struct Ref_Count */
 static inline struct Ref_Count* rc_fromData (char *x)
 {
     return (struct Ref_Count *)((void *)x - rc_getDataOffset());
 }
 
+/* Return the number of Cow */
 static inline size_t rc_count (char *x)
 {
     return rc_fromData(x)->RefCount_;
 }
 
+/* Create a struct Ref_Count.
+ * Init RefCount and `malloc` for the space of struct Ref_Count and string
+ */
 static inline char *rc_create (const void *p, size_t capacity)
 {
     struct Ref_Count *result = malloc(rc_getDataOffset() + ((size_t) 1 << capacity));
@@ -157,6 +165,7 @@ xs *xs_concat(xs *string, const xs *prefix, const xs *suffix)
 {
     if (xs_is_ptr(string)) {
         if (rc_count(xs_data(string)) > 0) {
+            /* copy-on-write */
             rc_decrement(xs_data(string));
             string->ptr = rc_create(xs_data(string), xs_capacity(string));
         }
@@ -219,6 +228,14 @@ xs *xs_trim(xs *x, const char *trimset)
      * Do not reallocate immediately. Instead, reuse it as possible.
      * Do not shrink to in place if < 16 bytes.
      */
+    if (xs_is_ptr(x) & slen != xs_size(x)) {
+        if (rc_count(xs_data(x)) > 0) {
+            /* copy-on-write */
+            rc_decrement(xs_data(x));
+            x->ptr = rc_create(xs_data(x), xs_capacity(x));
+            orig = xs_data(x);
+        }
+    }
     memmove(orig, dataptr, slen);
     /* do not dirty memory unless it is needed */
     if (orig[slen])
@@ -260,23 +277,16 @@ int main()
     xs_trim(&string, "\n ");
     printf("[%s] : %2zu\n", xs_data(&string), xs_size(&string));
 
-    xs prefix = *xs_tmp("((("), suffix = *xs_tmp(")))");
+    xs prefix = *xs_tmp("(((((("), suffix = *xs_tmp("))))))");
     xs_concat(&string, &prefix, &suffix);
     printf("[%s] : %2zu\n", xs_data(&string), xs_size(&string));
+    xs cpy = *xs_cpy(&xs_literal_empty(), &string);
+    printf("[%s] : %2zu\n", xs_data(&cpy), xs_size(&cpy));
+    printf("Ref count of string : %ld\n", rc_count(xs_data(&string)));
 
-    xs copiedString = *xs_cpy(&xs_literal_empty(), &string);
-    printf("[%s] : %2zu\n", xs_data(&copiedString), xs_size(&copiedString));
-    // printf("src's refcount : %ld\n", rc_count(string.ptr));
-    // printf("copiedString's refcount : %ld\n", rc_count(copiedString.ptr));
-
-    xs copiedString2 = *xs_cpy(&xs_literal_empty(), &string);
-    // printf("src's refcount : %ld\n", rc_count(string.ptr));
-
-    xs_concat(&string, &prefix, &suffix);
-    printf("[%s] : %2zu\n", xs_data(&string), xs_size(&string));
-    // printf("src's refcount : %ld\n", rc_count(string.ptr));
-    printf("[%s] : %2zu\n", xs_data(&copiedString), xs_size(&copiedString));
-    // printf("copiedString's refcount : %ld\n", rc_count(copiedString.ptr));
-
+    xs_trim(&string, "()");
+    printf("After trim : [%s] : %2zu\n", xs_data(&string), xs_size(&string));
+    printf("Ref count of string : %ld\n", rc_count(xs_data(&string)));
+    printf("Ref count of cpy : %ld\n", rc_count(xs_data(&cpy)));
     return 0;
 }
